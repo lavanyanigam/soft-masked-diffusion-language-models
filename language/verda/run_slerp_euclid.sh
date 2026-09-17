@@ -40,6 +40,9 @@ LOG_EVERY="${LOG_EVERY:-3}"
 FIXED_LAMBDA="${FIXED_LAMBDA:--1.0}"           # >=0 pins lambda (must be in [0,1])
 BASE_CKPT="${BASE_CKPT:-}"                      # REQUIRED: finetune-from checkpoint
 OUT_ROOT="${OUT_ROOT:-./outputs}"
+WANDB_PROJECT="${WANDB_PROJECT:-finetune-main}"
+WANDB_ENTITY="${WANDB_ENTITY:-slerp-on-smdlm}"   # set to your own entity if you
+                                                 # lack write access to the lab team
 
 # Run from language/ (this script lives in language/verda/).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -144,8 +147,8 @@ ARGS=(
   training.finetune_path="$BASE_CKPT"
   checkpointing.resume_from_ckpt=false
   callbacks.checkpoint_every_n_steps.every_n_train_steps="$CHECKPOINT_EVERY"
-  wandb.project="finetune-main"
-  wandb.entity="slerp-on-smdlm"
+  wandb.project="$WANDB_PROJECT"
+  wandb.entity="$WANDB_ENTITY"
   wandb.group="$GROUP"
   wandb.name="$RUN_NAME"
   ++hydra.run.dir="$OUT_DIR"
