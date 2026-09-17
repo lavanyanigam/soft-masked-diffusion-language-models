@@ -18,7 +18,7 @@
 # ===========================================================================
 #SBATCH --job-name=sm-mdlm
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:2                 # TODO: GPUs per node (also the DDP world size)
+#SBATCH --gres=gpu:4                 # take the node; the job pins a matched subset below
 #SBATCH --ntasks=1                   # one task; Lightning spawns the per-GPU procs
 #SBATCH --cpus-per-task=16           # TODO: ~4 dataloader workers/GPU
 #SBATCH --mem=128G                   # TODO: cluster-dependent
@@ -97,8 +97,42 @@ if len(caps) > 1:
     print("[job]          request matched cards (--gres=gpu:a6000:N) or use --gres=gpu:1.")
 PYEOF
 
-# The launchers read the GPU count from CUDA_VISIBLE_DEVICES (set by SLURM via
-# --gres), so we deliberately do NOT pass NUM_GPUS.
+# ── Pin to a homogeneous set of GPUs ───────────────────────────────────────
+# Where the cluster's gres is untyped (vitallab2 advertises a bare "gpu:4"),
+# Slurm cannot be asked for matched cards, and an allocation mixing
+# architectures kills NCCL. So take the whole node and choose here.
+#
+# Selection: the most common GPU model in the allocation, then the largest
+# count N that keeps the global batch divisible -- 512 / (N * 16) must be a
+# whole number, so N is one of 4, 2, 1. Override with GPUS_WANTED.
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]] || [[ "$(nvidia-smi -L 2>/dev/null | wc -l)" -gt 1 ]]; then
+  PIN="$(python - <<'PYEOF'
+import subprocess, collections, os
+try:
+    out = subprocess.run(["nvidia-smi", "--query-gpu=index,name", "--format=csv,noheader"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+except Exception:
+    raise SystemExit
+rows = [r.split(",", 1) for r in out.splitlines() if r.strip()]
+by = collections.defaultdict(list)
+for i, name in rows:
+    by[name.strip()].append(i.strip())
+# Largest homogeneous group; ties broken by model name for determinism.
+model, idxs = max(by.items(), key=lambda kv: (len(kv[1]), kv[0]))
+want = os.environ.get("GPUS_WANTED")
+n = int(want) if want else next((c for c in (4, 2, 1) if c <= len(idxs)), 1)
+n = min(n, len(idxs))
+print(",".join(idxs[:n]))
+PYEOF
+)"
+  if [[ -n "$PIN" ]]; then
+    export CUDA_VISIBLE_DEVICES="$PIN"
+    echo "[job] pinned CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} (matched GPUs only)"
+  fi
+fi
+
+# The launchers read the GPU count from CUDA_VISIBLE_DEVICES, so we deliberately
+# do NOT pass NUM_GPUS.
 case "$ALG" in
   slerp)        LAUNCHER="verda/run_slerp.sh" ;;
   slerp_euclid) LAUNCHER="verda/run_slerp_euclid.sh" ;;
