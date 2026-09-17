@@ -116,8 +116,8 @@ app = modal.App("slerp-vs-topk-finetune")
 
 @app.function(
     image=image,
-    gpu="L40S",
-    timeout=7 * 3600,  # 7 h — generous for 5k steps
+    gpu=os.environ.get("MODAL_GPU", "A100"),
+    timeout=24 * 3600,  # 24 h — 7k steps at global batch 512 on one A100
     volumes={
         CKPT_DIR: ckpt_volume,
         DATA_DIR: data_volume,
@@ -197,6 +197,8 @@ def train(
         alg_tag = "topk"
     elif transparency_alg == "slerp_sm":
         alg_tag = "slerp"
+    elif transparency_alg == "slerp_euclid_mean":
+        alg_tag = "slerp_euclid"
     elif transparency_alg == "lerp_renorm":
         alg_tag = "lerp_renorm"
     else:
@@ -271,7 +273,7 @@ def train(
         f"++checkpointing.save_dir={out_dir}",
     ]
 
-    if transparency_alg == "slerp_sm":
+    if transparency_alg in ("slerp_sm", "slerp_euclid_mean"):
         cmd.append(f"algo.tran_head.slerp_n_iter={slerp_n_iter}")
     if fixed_lambda >= 0.0:
         cmd.append(f"algo.tran_head.fixed_lambda={fixed_lambda}")
@@ -358,8 +360,13 @@ def main(
         algs.append("slerp_sm")
     if alg in ("lerp_renorm", "renorm", "all"):
         algs.append("lerp_renorm")
+    if alg in ("slerp_euclid", "euclid", "all"):
+        algs.append("slerp_euclid_mean")
     if not algs:
-        raise ValueError(f"--alg must be 'topk', 'slerp', 'lerp_renorm', 'both', or 'all'; got '{alg}'")
+        raise ValueError(
+            f"--alg must be 'topk', 'slerp', 'slerp_euclid', 'lerp_renorm', "
+            f"'both', or 'all'; got '{alg}'"
+        )
 
     if parallel and len(algs) > 1:
         # Spawn both on separate A100s; wait for both to finish
