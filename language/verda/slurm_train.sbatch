@@ -99,36 +99,59 @@ PYEOF
 
 # ── Pin to a homogeneous set of GPUs ───────────────────────────────────────
 # Where the cluster's gres is untyped (vitallab2 advertises a bare "gpu:4"),
-# Slurm cannot be asked for matched cards, and an allocation mixing
-# architectures kills NCCL. So take the whole node and choose here.
+# Slurm cannot be asked for matched cards, and an allocation that mixes
+# architectures kills NCCL. So narrow the allocation here when, and only when,
+# it is actually heterogeneous -- a homogeneous allocation is left exactly as
+# Slurm handed it over.
 #
-# Selection: the most common GPU model in the allocation, then the largest
-# count N that keeps the global batch divisible -- 512 / (N * 16) must be a
-# whole number, so N is one of 4, 2, 1. Override with GPUS_WANTED.
-if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]] || [[ "$(nvidia-smi -L 2>/dev/null | wc -l)" -gt 1 ]]; then
-  PIN="$(python - <<'PYEOF'
-import subprocess, collections, os
+# Selection: the largest group of identical GPU models, then the largest count
+# N that keeps the global batch divisible -- 512 / (N * 16) must be whole, so N
+# is one of 4, 2, 1. Override the count with GPUS_WANTED.
+PINPY="$(mktemp)"
+cat > "$PINPY" <<'PYEOF'
+import os, collections
 try:
-    out = subprocess.run(["nvidia-smi", "--query-gpu=index,name", "--format=csv,noheader"],
-                         capture_output=True, text=True, check=True).stdout.strip()
+    import torch
 except Exception:
     raise SystemExit
-rows = [r.split(",", 1) for r in out.splitlines() if r.strip()]
-by = collections.defaultdict(list)
-for i, name in rows:
-    by[name.strip()].append(i.strip())
-# Largest homogeneous group; ties broken by model name for determinism.
-model, idxs = max(by.items(), key=lambda kv: (len(kv[1]), kv[0]))
+# torch enumerates exactly the devices Slurm made visible, in the same order as
+# CUDA_VISIBLE_DEVICES -- unlike nvidia-smi, which always reports every card on
+# the node and would hand back ids belonging to somebody else's job.
+vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+phys = [x for x in vis.split(",") if x != ""] or [str(i) for i in range(torch.cuda.device_count())]
+if len(phys) != torch.cuda.device_count():
+    raise SystemExit
+
+# Usability beats model names: a card this build has no kernels for (a Blackwell
+# under a CUDA 12.4 wheel) fails here, and naming heuristics would have guessed.
+usable = []
+for i, pid in enumerate(phys):
+    try:
+        torch.zeros(1, device="cuda:%d" % i)
+        usable.append((pid, torch.cuda.get_device_name(i)))
+    except Exception:
+        print("DROP %s %s" % (pid, "unusable"), file=__import__("sys").stderr)
+
+if not usable:
+    raise SystemExit
 want = os.environ.get("GPUS_WANTED")
-n = int(want) if want else next((c for c in (4, 2, 1) if c <= len(idxs)), 1)
-n = min(n, len(idxs))
-print(",".join(idxs[:n]))
+groups = collections.defaultdict(list)
+for pid, nm in usable:
+    groups[nm].append(pid)
+# Largest group; ties broken by lowest physical index, never by model name.
+model, ids = max(groups.items(), key=lambda kv: (len(kv[1]), -int(kv[1][0])))
+if len(usable) == len(phys) and len(groups) == 1 and not want:
+    raise SystemExit          # everything works and matches: leave Slurm alone
+n = int(want) if want else next((c for c in (4, 2, 1) if c <= len(ids)), 1)
+print(",".join(ids[:min(n, len(ids))]))
 PYEOF
-)"
-  if [[ -n "$PIN" ]]; then
-    export CUDA_VISIBLE_DEVICES="$PIN"
-    echo "[job] pinned CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} (matched GPUs only)"
-  fi
+PIN="$(python "$PINPY" 2>/dev/null || true)"
+rm -f "$PINPY"
+if [[ -n "$PIN" ]]; then
+  export CUDA_VISIBLE_DEVICES="$PIN"
+  echo "[job] narrowed CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+else
+  echo "[job] using Slurm's allocation as given: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 fi
 
 # The launchers read the GPU count from CUDA_VISIBLE_DEVICES, so we deliberately
