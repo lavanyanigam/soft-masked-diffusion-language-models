@@ -238,6 +238,14 @@ class MDLM_SM(MDLM):
                 on_epoch=False,
                 sync_dist=True,
             )
+        if getattr(self.tran_head, "last_mean_disagreement_angle", None) is not None:
+            self.log(
+                "transparency/mean_disagreement_angle",
+                self.tran_head.last_mean_disagreement_angle.item(),
+                on_step=True,
+                on_epoch=False,
+                sync_dist=True,
+            )
         if self.tran_head.last_feedback_norm_mean is not None:
             self.log(
                 "transparency/feedback_embedding_norm_mean",
@@ -410,7 +418,12 @@ class MDLM_SM(MDLM):
 
                 r_val = self._get_reliability_multiplier() if self.training else 1.0
 
-                if self.tran_head.transparency_alg in ("slerp_sm", "lerp_renorm", "mixinputs_with_topk"):
+                if self.tran_head.transparency_alg in (
+                    "slerp_sm",
+                    "slerp_euclid_mean",
+                    "lerp_renorm",
+                    "mixinputs_with_topk",
+                ):
                     # Soft feedback works in embedding space / requires embedding table for norm tracking
                     embedding_matrix = self.backbone.vocab_embed.embedding
                     p_x0_sm = self.tran_head(

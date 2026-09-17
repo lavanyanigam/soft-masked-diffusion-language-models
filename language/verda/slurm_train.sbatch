@@ -30,7 +30,7 @@
 set -euo pipefail
 
 # ── User config (override via --export=ALL,VAR=...) ────────────────────────
-ALG="${ALG:-slerp}"                                  # slerp | topk
+ALG="${ALG:-slerp}"                    # slerp | slerp_euclid | topk | lerp_renorm
 ENV_NAME="${ENV_NAME:-sm-env}"
 CONDA_HOME="${CONDA_HOME:-/opt/miniforge3}"
 
@@ -43,6 +43,7 @@ export OUT_ROOT="${OUT_ROOT:-$HOME/sm_outputs}"
 export SEED="${SEED:-3}"
 export MAX_STEPS="${MAX_STEPS:--1}"           # -1 = unlimited
 export CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
+export FIXED_LAMBDA="${FIXED_LAMBDA:--1.0}"   # >=0 pins lambda; -1.0 = learned schedule
 
 # W&B — online since vitallab1 has internet access.
 export WANDB_MODE="${WANDB_MODE:-online}"
@@ -64,10 +65,11 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
 # The launchers read the GPU count from CUDA_VISIBLE_DEVICES (set by SLURM via
 # --gres), so we deliberately do NOT pass NUM_GPUS.
 case "$ALG" in
-  slerp)       LAUNCHER="verda/run_slerp.sh" ;;
-  topk)        LAUNCHER="verda/run_topk.sh" ;;
-  lerp_renorm) LAUNCHER="verda/run_lerp_renorm.sh" ;;
-  *) echo "[job] ALG must be 'slerp', 'topk', or 'lerp_renorm', got '${ALG}'"; exit 1 ;;
+  slerp)        LAUNCHER="verda/run_slerp.sh" ;;
+  slerp_euclid) LAUNCHER="verda/run_slerp_euclid.sh" ;;
+  topk)         LAUNCHER="verda/run_topk.sh" ;;
+  lerp_renorm)  LAUNCHER="verda/run_lerp_renorm.sh" ;;
+  *) echo "[job] ALG must be 'slerp', 'slerp_euclid', 'topk', or 'lerp_renorm', got '${ALG}'"; exit 1 ;;
 esac
 
 echo "[job] launching ${LAUNCHER}"

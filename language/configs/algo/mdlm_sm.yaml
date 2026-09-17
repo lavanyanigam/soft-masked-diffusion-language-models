@@ -13,7 +13,9 @@ tran_head:
   init_steep: 6.66
   init_temperature: 1.0
   mixinputs_k : 3
-  # mixinputs_with_topk / mixinputs_with_temp / slerp_sm / lerp_renorm
+  # mixinputs_with_topk / mixinputs_with_temp / slerp_sm / slerp_euclid_mean / lerp_renorm
+  # slerp_euclid_mean == slerp_sm but with the normalised Euclidean (LERP) mean
+  # of the top-k embeddings in place of the Frechet mean; the blend is identical.
   transparency_alg: mixinputs_with_topk
   # Number of Frechet-mean (Karcher) iterations used by slerp_sm
   slerp_n_iter: 3

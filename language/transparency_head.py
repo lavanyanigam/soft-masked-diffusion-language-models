@@ -62,20 +62,31 @@ def slerp_sm_feedback(
     n_iter=3,
     eps=1e-6,
     stats=None,
+    euclidean_mean=False,
 ):
     """
     Soft-mask feedback in embedding space.
 
     For each masked position we SLERP between the (normalised) mask-token
-    embedding and the Frechet mean of the top-k predicted token embeddings on
-    the unit hypersphere. Unmasked positions keep their own token embedding.
+    embedding and an aggregate of the top-k predicted token embeddings on the
+    unit hypersphere. Unmasked positions keep their own token embedding.
+
+    The aggregate is the Frechet (Karcher) mean by default. With
+    `euclidean_mean=True` it is instead the pi-weighted Euclidean mean of the
+    raw top-k embeddings, projected back onto the sphere -- i.e. exactly the
+    mu_LERP the TopK/LERP baseline aggregates. Everything after the mean
+    (SLERP blend, degenerate-angle fallback, norm restoration) is identical in
+    both cases, so the two paths isolate the choice of mean and nothing else.
 
     input_ids:        (B, T)     current (partially masked) token ids
     masked_logits:    (M, V)     feedback logits at masked positions
     embedding_matrix: (V, D)     token embedding table E
     lambda_tensor:    (B, T, 1)  SLERP weight, 0 on non-mask positions
     stats:            optional dict; if given, gets "slerp_angle_mean" (the mean
-                      SLERP angle over masked positions) for live logging
+                      SLERP angle over masked positions) for live logging, and
+                      under euclidean_mean also "mean_disagreement_angle"
+    euclidean_mean:   if True, use the normalised Euclidean weighted mean of the
+                      raw top-k embeddings instead of the Frechet mean
     Returns:          (B, T, D)  soft input embeddings
     """
     compute_dtype = torch.float32
@@ -97,9 +108,31 @@ def slerp_sm_feedback(
     topk_logits, topk_indices = torch.topk(masked_logits, k=top_k, dim=-1)  # (M, k)
     pi = torch.softmax(topk_logits.to(compute_dtype), dim=-1)  # (M, k)
 
-    # Unit embeddings of the top-k tokens and Frechet mean mu*.
-    vhat = F.normalize(E[topk_indices].to(compute_dtype), dim=-1, eps=eps)  # (M, k, D)
-    mu = frechet_mean_sphere(vhat, pi, n_iter, eps)  # (M, D)
+    # Aggregate target direction mu* from the top-k embeddings.
+    if euclidean_mean:
+        # Reviewer ablation: pi-weighted Euclidean mean of the RAW top-k
+        # embeddings (identical to mu_LERP in the TopK/LERP baseline),
+        # projected onto S^{D-1}. Only the mean changes; the blend below does not.
+        e_mean = (pi.unsqueeze(-1) * E[topk_indices].to(compute_dtype)).sum(-2)  # (M, D)
+        mu = F.normalize(e_mean, dim=-1, eps=eps)  # (M, D)
+        if stats is not None:
+            # How far this target sits from the Frechet mean it replaces, so a
+            # null downstream result can still be reported quantitatively.
+            mu_frechet = frechet_mean_sphere(
+                F.normalize(E[topk_indices].to(compute_dtype), dim=-1, eps=eps),
+                pi,
+                n_iter,
+                eps,
+            )
+            stats["mean_disagreement_angle"] = (
+                torch.acos((mu * mu_frechet).sum(-1).clamp(-1 + eps, 1 - eps))
+                .mean()
+                .detach()
+            )
+    else:
+        # Unit embeddings of the top-k tokens and Frechet mean mu*.
+        vhat = F.normalize(E[topk_indices].to(compute_dtype), dim=-1, eps=eps)  # (M, k, D)
+        mu = frechet_mean_sphere(vhat, pi, n_iter, eps)  # (M, D)
 
     # Normalised mask embedding m_hat. Keep the original mask-token norm so we
     # can rescale the unit-sphere SLERP result back to the embedding scale the
@@ -255,6 +288,7 @@ class TransparencyHead(nn.Module):
         )
         self.last_lambda_std = torch.tensor(0.0)
         self.last_slerp_angle_mean = torch.tensor(0.0)
+        self.last_mean_disagreement_angle = None
         self.last_feedback_norm_mean = None
         self.last_feedback_norm_std = None
         self.last_raw_lerp_norm_mean = None
@@ -339,9 +373,15 @@ class TransparencyHead(nn.Module):
         )
         mask_positions = input_ids == self.mask_token_id  # (B, T)
 
-        # slerp_sm, lerp_renorm, and topk never use p_full. Restrict the softmax to masked
+        # slerp_sm, slerp_euclid_mean, lerp_renorm, and topk never use p_full. Restrict
+        # the softmax to masked
         # positions only (avoids full (B,T,V) softmax for unmasked tokens).
-        if self.transparency_alg in ("slerp_sm", "lerp_renorm", "mixinputs_with_topk"):
+        if self.transparency_alg in (
+            "slerp_sm",
+            "slerp_euclid_mean",
+            "lerp_renorm",
+            "mixinputs_with_topk",
+        ):
             # GATHER: Select only the logits for masked positions
             masked_logits = logits_prelim[mask_positions]  # (M, V)
             neg_entropy = logits_prelim.new_zeros(input_ids.shape)
@@ -372,11 +412,14 @@ class TransparencyHead(nn.Module):
             # unbiased=False so a single masked position still yields std=0 instead of NaN
             self.last_lambda_std = masked_lambdas.std(unbiased=False).detach()
 
-        if self.transparency_alg == "slerp_sm":
+        if self.transparency_alg in ("slerp_sm", "slerp_euclid_mean"):
             # Spherical feedback in embedding space; returns inputs_embeds (B,T,D).
-            assert (
-                embedding_matrix is not None
-            ), "transparency_alg='slerp_sm' requires the token embedding matrix"
+            # The two algs share this path and differ only in how the top-k
+            # aggregate is formed (Frechet mean vs. normalised Euclidean mean).
+            assert embedding_matrix is not None, (
+                f"transparency_alg='{self.transparency_alg}' requires the token "
+                "embedding matrix"
+            )
             stats = {}
             out = slerp_sm_feedback(
                 input_ids,
@@ -388,8 +431,10 @@ class TransparencyHead(nn.Module):
                 self.slerp_n_iter,
                 self.epsilon,
                 stats=stats,
+                euclidean_mean=(self.transparency_alg == "slerp_euclid_mean"),
             )
             self.last_slerp_angle_mean = stats.get("slerp_angle_mean")
+            self.last_mean_disagreement_angle = stats.get("mean_disagreement_angle")
             self.last_feedback_norm_mean = stats.get("feedback_norm_mean")
             self.last_feedback_norm_std = stats.get("feedback_norm_std")
             self.last_feedback_norms = stats.get("feedback_norms")
