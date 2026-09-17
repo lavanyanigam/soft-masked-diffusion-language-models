@@ -45,22 +45,57 @@ export MAX_STEPS="${MAX_STEPS:--1}"           # -1 = unlimited
 export CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 export FIXED_LAMBDA="${FIXED_LAMBDA:--1.0}"   # >=0 pins lambda; -1.0 = learned schedule
 
-# W&B — online since vitallab1 has internet access.
+# W&B — online since the lab boxes have internet access. WANDB_API_KEY should be
+# passed through --export=ALL,WANDB_API_KEY=... when the node's saved netrc
+# belongs to a different account.
 export WANDB_MODE="${WANDB_MODE:-online}"
 
-# ── Activate the env built by setup_cluster.sh ─────────────────────────────
-if [[ ! -d "$CONDA_HOME" ]]; then
-  echo "[job] CONDA_HOME=$CONDA_HOME not found — run verda/setup_cluster.sh first."; exit 1
+# NCCL. vitallab2 (driver 580 / CUDA 13, NCCL 2.21.5) fails its first collective
+# with "unhandled cuda error ... invalid argument" unless P2P is off. Disabling
+# P2P costs almost nothing on a single node at this batch size. Set
+# NCCL_P2P_DISABLE=0 to restore it. Ignored entirely on a 1-GPU job.
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+
+# ── Activate the conda env if there is one ─────────────────────────────────
+# Not every box has one: on vitallab2 the dependencies are installed into the
+# user site-packages of the system python, and there is no sm-env to activate.
+# Missing conda is therefore a note, not a failure.
+if [[ -f "${CONDA_HOME}/etc/profile.d/conda.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${CONDA_HOME}/etc/profile.d/conda.sh"
+  if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+    conda activate "$ENV_NAME"
+    echo "[job] activated conda env '${ENV_NAME}'"
+  else
+    echo "[job] conda env '${ENV_NAME}' not found — using the current python"
+  fi
+else
+  echo "[job] no conda at ${CONDA_HOME} — using the current python"
 fi
-# shellcheck source=/dev/null
-source "${CONDA_HOME}/etc/profile.d/conda.sh"
-conda activate "$ENV_NAME"
 
 # ── Run from language/ (using directory where sbatch command was run) ──────
 cd "$SLURM_SUBMIT_DIR"
 
 echo "[job] node=$(hostname)  ALG=${ALG}  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
+
+# Compute capabilities of the ALLOCATED devices. Two different architectures in
+# one job is the second known cause of the NCCL "invalid argument" failure --
+# a Blackwell card has no kernels in a CUDA 12.4 build -- and nvidia-smi above
+# does not show it.
+python - <<'PYEOF' || true
+import torch
+print(f"[job] torch {torch.__version__}  cuda {torch.version.cuda}  visible {torch.cuda.device_count()}")
+caps = set()
+for i in range(torch.cuda.device_count()):
+    c = torch.cuda.get_device_capability(i)
+    caps.add(c)
+    print(f"[job]   gpu{i} {torch.cuda.get_device_name(i)} sm_{c[0]}{c[1]}")
+if len(caps) > 1:
+    print("[job] WARNING: mixed GPU architectures in this allocation — NCCL will likely fail.")
+    print("[job]          request matched cards (--gres=gpu:a6000:N) or use --gres=gpu:1.")
+PYEOF
 
 # The launchers read the GPU count from CUDA_VISIBLE_DEVICES (set by SLURM via
 # --gres), so we deliberately do NOT pass NUM_GPUS.
