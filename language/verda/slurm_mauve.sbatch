@@ -102,9 +102,18 @@ source "${CONDA_HOME}/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 
 # ── Run from language/ ─────────────────────────────────────────────────────
+# Slurm copies the batch script into its spool directory before running it, so
+# deriving the repo path from BASH_SOURCE lands in /scratch/.../spool and
+# `python -m main` then fails with "No module named main". Prefer the directory
+# sbatch was invoked from; fall back to the script-relative path when run
+# directly from a shell.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LANG_DIR="$(dirname "$SCRIPT_DIR")"
-cd "$LANG_DIR"
+cd "${SLURM_SUBMIT_DIR:-$LANG_DIR}"
+if [[ ! -f main.py ]]; then
+  echo "[job] main.py not found in $(pwd) — submit sbatch from the language/ directory."
+  exit 1
+fi
 
 mkdir -p "$CKPT_DIR" "$OUT_DIR"
 
