@@ -145,6 +145,39 @@ if [[ ! -f "$BASE_CKPT" ]]; then
   exit 1
 fi
 
+# ── Drop GPUs this build cannot use ────────────────────────────────────────
+# vitallab2 advertises an untyped "gpu:4" gres, so --gres=gpu:1 can hand back
+# the RTX PRO 5000 Blackwell, which has no kernels in this CUDA 12.4 wheel.
+# Test what was allocated and keep only what works. A healthy allocation is
+# left exactly as Slurm gave it.
+PINPY="$(mktemp)"
+cat > "$PINPY" <<'PYEOF'
+import os
+try:
+    import torch
+except Exception:
+    raise SystemExit
+vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+phys = [x for x in vis.split(",") if x != ""] or [str(i) for i in range(torch.cuda.device_count())]
+if len(phys) != torch.cuda.device_count():
+    raise SystemExit
+ok = []
+for i, pid in enumerate(phys):
+    try:
+        torch.zeros(1, device="cuda:%d" % i)
+        ok.append(pid)
+    except Exception:
+        pass
+if ok and len(ok) != len(phys):
+    print(ok[0])          # generation is single-GPU; one working card is enough
+PYEOF
+PIN="$(python "$PINPY" 2>/dev/null || true)"
+rm -f "$PINPY"
+if [[ -n "$PIN" ]]; then
+  export CUDA_VISIBLE_DEVICES="$PIN"
+  echo "[job] dropped unusable GPU(s); using CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+fi
+
 GENERATED_SEQS_PATH="${OUT_DIR}/${ALGO}_${SAMPLER}_T-${SAMPLING_STEPS}_topp-${P_NUCLEUS}_eta-${ETA}_ton-${T_ON}_toff-${T_OFF}_alphaon-${ALPHA_ON}.json"
 
 # ── Build the python command (mode=sample_eval runs generation + MAUVE) ───
