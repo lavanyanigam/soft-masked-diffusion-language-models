@@ -275,6 +275,13 @@ def main(config):
             "gen_ppl": gen_ppl,
             "entropy": sum(entropies) / len(entropies),
             "MAUVE": mauve_score,
+            # Keep the generations. Without these two keys every sample_eval run
+            # discards all 5000 decoded sequences and retains three floats, which
+            # is why the human-evaluation set had to be rebuilt from older output
+            # files. run_modal_mauve.py's docstring has always claimed these are
+            # written; now they are.
+            "entropies": entropies,
+            "text_samples": samples,
         }
         with open(config.sampling.generated_seqs_path, "w") as file:
             json.dump(result_dict, file, indent=4)
