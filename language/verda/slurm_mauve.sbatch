@@ -220,10 +220,19 @@ PY_ARGS+=(
 
 # soft-masking transparency head (forwarded regardless of algo; main.py only uses them for mdlm_sm)
 if [[ "$ALGO" == "mdlm_sm" ]]; then
+  # These live under algo.tran_head, not algo. The flat form is rejected by
+  # Hydra ("Key 'transparency_alg' is not in struct") and the job dies in
+  # seconds, so every mdlm_sm evaluation through this script failed until now.
   PY_ARGS+=(
-    "algo.transparency_alg=${TRANSPARENCY_ALG}"
-    "algo.fixed_lambda=${FIXED_LAMBDA}"
+    "algo.tran_head.transparency_alg=${TRANSPARENCY_ALG}"
   )
+  # A negative FIXED_LAMBDA means "keep the learned schedule" -- forwarding it
+  # would pin lambda to a negative value and fail validation.
+  if [[ ! "$FIXED_LAMBDA" =~ ^- ]]; then
+    PY_ARGS+=(
+      "algo.tran_head.fixed_lambda=${FIXED_LAMBDA}"
+    )
+  fi
 fi
 
 echo "[job] launching: python ${PY_ARGS[*]}"
