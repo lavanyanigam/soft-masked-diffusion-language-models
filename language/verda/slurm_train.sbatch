@@ -44,6 +44,7 @@ export SEED="${SEED:-3}"
 export MAX_STEPS="${MAX_STEPS:--1}"           # -1 = unlimited
 export CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 export FIXED_LAMBDA="${FIXED_LAMBDA:--1.0}"   # >=0 pins lambda; -1.0 = learned schedule
+export RESUME_FROM="${RESUME_FROM:-}"         # resume a crashed run from this .ckpt (use last.ckpt, never best.ckpt)
 
 # W&B — online since the lab boxes have internet access. WANDB_API_KEY should be
 # passed through --export=ALL,WANDB_API_KEY=... when the node's saved netrc

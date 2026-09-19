@@ -145,7 +145,6 @@ ARGS=(
   eval.compute_generative_perplexity=False
   eval.generate_samples=False
   training.finetune_path="$BASE_CKPT"
-  checkpointing.resume_from_ckpt=false
   callbacks.checkpoint_every_n_steps.every_n_train_steps="$CHECKPOINT_EVERY"
   wandb.project="$WANDB_PROJECT"
   wandb.entity="$WANDB_ENTITY"
@@ -154,6 +153,26 @@ ARGS=(
   ++hydra.run.dir="$OUT_DIR"
   ++checkpointing.save_dir="$OUT_DIR"
 )
+
+# Resume a crashed run: RESUME_FROM=/path/to/last.ckpt
+#
+# config.yaml defaults resume_ckpt_path to best.ckpt, which is a trap here --
+# validation is disabled on these runs, so best.ckpt is whatever the monitor
+# happened to write in the first few steps. Resuming from it would silently
+# restart from near zero. Always name last.ckpt (or a specific step) explicitly.
+if [[ -n "${RESUME_FROM:-}" ]]; then
+  if [[ ! -f "$RESUME_FROM" ]]; then
+    echo "[preflight] RESUME_FROM not found: ${RESUME_FROM}"; exit 1
+  fi
+  echo "[config] RESUMING from ${RESUME_FROM}"
+  ARGS+=(
+    checkpointing.resume_from_ckpt=true
+    "checkpointing.resume_ckpt_path=${RESUME_FROM}"
+  )
+else
+  ARGS+=( checkpointing.resume_from_ckpt=false )
+fi
+
 [[ "$USE_FL" == "1" ]] && ARGS+=( algo.tran_head.fixed_lambda="$FIXED_LAMBDA" )
 
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
