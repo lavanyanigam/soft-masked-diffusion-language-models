@@ -216,8 +216,17 @@ def main():
 
         # lambda / top-1 recorded the FIRST time each position is seen while
         # still masked, which is when the feedback for it is actually formed.
-        lam_rec = torch.full(x0.shape, float("nan"), device="cuda")
-        top1_rec = torch.full(x0.shape, -1, dtype=torch.long, device="cuda")
+        # Record the STRONGEST feedback each position ever received while it was
+        # still masked, and what was predicted at that moment.
+        #
+        # Recording at the first step a position is seen masked does not work:
+        # that is step 0, where t=1.0 is outside the soft-mask band, feedback is
+        # None and lambda is 0 by construction -- so every position would be
+        # stamped with lambda=0 and nothing would ever be flagged.
+        lam_max = torch.zeros(x0.shape, device="cuda")
+        top1_at_max = torch.full(x0.shape, -1, dtype=torch.long, device="cuda")
+        seen_inband = torch.zeros(x0.shape, dtype=torch.bool, device="cuda")
+        n_fb_steps = 0
 
         # ---- denoise ----------------------------------------------------
         eps_t = 1e-5
@@ -241,24 +250,23 @@ def main():
                 p_x0 = log_p.exp()
 
                 cur_mask = x == mask_index
-                if cur_mask.any():
+                if cur_mask.any() and feedback is not None:
+                    n_fb_steps += 1
                     # lambda exactly as TransparencyHead.forward computes it
-                    if feedback is not None:
-                        ne = torch.zeros(x.shape, device="cuda", dtype=log_p.dtype)
-                        ne_m, _ = model.tran_head.get_neg_entropy_and_probabilities(
-                            feedback[cur_mask]
-                        )
-                        ne[cur_mask] = ne_m
-                        lam = model.tran_head.calculate_lambda_tensor(
-                            ne, cur_mask, None, None, 1.0
-                        )
-                    else:
-                        lam = torch.zeros(x.shape, device="cuda")
+                    ne = torch.zeros(x.shape, device="cuda", dtype=log_p.dtype)
+                    ne_m, _ = model.tran_head.get_neg_entropy_and_probabilities(
+                        feedback[cur_mask]
+                    )
+                    ne[cur_mask] = ne_m
+                    lam = model.tran_head.calculate_lambda_tensor(
+                        ne, cur_mask, None, None, 1.0
+                    ).float()
 
                     top1 = p_x0.argmax(-1)
-                    fresh = cur_mask & torch.isnan(lam_rec)
-                    lam_rec = torch.where(fresh, lam.float(), lam_rec)
-                    top1_rec = torch.where(fresh, top1, top1_rec)
+                    better = cur_mask & (lam > lam_max)
+                    lam_max = torch.where(better, lam, lam_max)
+                    top1_at_max = torch.where(better, top1, top1_at_max)
+                    seen_inband |= cur_mask
 
                 log_p_cache = log_p
 
@@ -272,13 +280,16 @@ def main():
                 x = copy_flag * x + (1 - copy_flag) * _x
 
         # ---- score ------------------------------------------------------
+        if n_fb_steps == 0:
+            sys.exit("[fatal] no in-band feedback steps; check optim.sm_t_min/max "
+                     f"against the {args.steps}-step schedule")
         final_correct = (x == x0) & masked0
-        rec_ok = masked0 & ~torch.isnan(lam_rec)
-        wrong_at_rec = rec_ok & (top1_rec != x0)
+        rec_ok = masked0 & seen_inband
+        wrong_at_rec = rec_ok & (top1_at_max != x0)
 
         for b in range(B):
             idx = rec_ok[b].nonzero(as_tuple=True)[0]
-            lam_all.append(lam_rec[b, idx].cpu())
+            lam_all.append(lam_max[b, idx].cpu())
             wrong_all.append(wrong_at_rec[b, idx].cpu())
             correct_all.append(final_correct[b, idx].cpu())
             pos_all.append(idx.cpu())
@@ -286,9 +297,11 @@ def main():
 
         if len(examples) < args.examples:
             examples.append(
-                _trace_example(tokenizer, x0, xt, x, lam_rec, top1_rec, masked0, args)
+                _trace_example(tokenizer, x0, xt, x, lam_max, top1_at_max, masked0, args)
             )
-        print(f"[run] {seen}/{args.n_seqs} sequences")
+        print(f"[run] {seen}/{args.n_seqs} sequences "
+              f"({n_fb_steps}/{args.steps} steps had feedback, "
+              f"lambda max {lam_max[masked0].max():.4f})")
 
     lam = torch.cat(lam_all)
     wrong = torch.cat(wrong_all)
@@ -344,7 +357,7 @@ def main():
 def _trace_example(tokenizer, x0, xt, x, lam_rec, top1_rec, masked0, args):
     """One human-readable trace: the highest-lambda wrong position in sequence 0."""
     b = 0
-    ok = masked0[b] & ~torch.isnan(lam_rec[b]) & (top1_rec[b] != x0[b])
+    ok = masked0[b] & (lam_rec[b] > 0) & (top1_rec[b] != x0[b])
     if not ok.any():
         return {"note": "no high-lambda error in this sequence"}
     i = int(torch.where(ok, lam_rec[b], torch.full_like(lam_rec[b], -1)).argmax())
