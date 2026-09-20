@@ -168,9 +168,20 @@ def main():
         cfg, tokenizer, skip_train=True, valid_seed=args.seed
     )
 
-    model = main_mod._load_from_checkpoint(
-        diffusion_model=algo_mod.MDLM_SM, config=cfg, tokenizer=tokenizer
+    # Non-strict: checkpoints written before initial_nll / current_nll_ema /
+    # R_ema were registered lack those buffers. They initialise to -1.0 and
+    # MDLM_SM.forward treats anything < 0 as "not set", so the NLL-annealed
+    # centre is simply skipped -- which is what those runs did anyway. R_ema
+    # is only read when reliability_conditioned is on, and it is off.
+    model = algo_mod.MDLM_SM.load_from_checkpoint(
+        args.ckpt, tokenizer=tokenizer, config=cfg, strict=False
     )
+    ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    missing = [k for k in ("initial_nll", "current_nll_ema", "R_ema")
+               if k not in ck["state_dict"]]
+    if missing:
+        print(f"[load] buffers absent from checkpoint, left at init: {missing}")
+    del ck
     model = model.to("cuda").eval()
     if cfg.eval.disable_ema:
         model.ema = None
