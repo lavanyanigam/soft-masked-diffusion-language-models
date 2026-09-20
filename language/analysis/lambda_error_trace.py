@@ -46,6 +46,40 @@ import torch
 # ---------------------------------------------------------------- comparison
 
 
+def _boot(run, n_boot=4000, seed=0):
+    """Bootstrap the accuracies and the neighbour penalty by resampling whole
+    sequences, which respects within-sequence correlation."""
+    import random as _r
+    rows = run.get("per_sequence")
+    if not rows:
+        return None
+    rng = _r.Random(seed)
+    idx = range(len(rows))
+    out = {"acc_far": [], "acc_neighbours": [], "acc_flagged": [], "penalty": []}
+    for _ in range(n_boot):
+        pick = [rows[rng.choice(idx)] for _ in idx]
+        acc = {}
+        for g, k in (("far", "acc_far"), ("near", "acc_neighbours"),
+                     ("flagged", "acc_flagged")):
+            n = sum(r[f"n_{g}"] for r in pick)
+            c = sum(r[f"c_{g}"] for r in pick)
+            acc[k] = c / n if n else float("nan")
+            out[k].append(acc[k])
+        out["penalty"].append(acc["acc_far"] - acc["acc_neighbours"])
+    return out
+
+
+def _ci(xs, lo=2.5, hi=97.5):
+    ys = sorted(x for x in xs if x == x)
+    if not ys:
+        return (float("nan"), float("nan"))
+    def q(p):
+        k = (len(ys) - 1) * p / 100.0
+        f, c = int(k), min(int(k) + 1, len(ys) - 1)
+        return ys[f] + (ys[c] - ys[f]) * (k - f)
+    return (q(lo), q(hi))
+
+
 def compare(paths):
     """Print the side-by-side table from saved per-arm result files."""
     runs = []
@@ -73,6 +107,30 @@ def compare(paths):
             v = r.get(k)
             row += (fmt.format(v) if isinstance(v, (int, float)) else "-").rjust(14)
         print(row)
+    print()
+
+    # ---- bootstrap intervals, and the between-arm difference --------------
+    boots = [_boot(r) for r in runs]
+    if all(b is not None for b in boots):
+        print("95% bootstrap CIs (resampling sequences, 4000 draws)")
+        for k, lbl in (("acc_far", "acc far from any flag"),
+                       ("acc_neighbours", "acc at +/-5 of flagged"),
+                       ("penalty", "neighbour penalty")):
+            row = lbl.ljust(w)
+            for r, b in zip(runs, boots):
+                lo, hi = _ci(b[k])
+                row += f"[{lo:+.4f},{hi:+.4f}]".rjust(22)
+            print(row)
+        if len(runs) == 2:
+            d = [x - y for x, y in zip(boots[0]["penalty"], boots[1]["penalty"])]
+            lo, hi = _ci(d)
+            obs = runs[0]["neighbour_penalty"] - runs[1]["neighbour_penalty"]
+            print(f"\n  penalty difference ({runs[0]['tag']} - {runs[1]['tag']}): "
+                  f"{obs:+.4f}  95% CI [{lo:+.4f}, {hi:+.4f}]")
+            print("  An interval spanning 0 means no detectable difference in")
+            print("  error propagation between the two arms.")
+    else:
+        print("(no per_sequence data in these files -- re-run to get intervals)")
     print()
     print("neighbour_penalty > 0 means positions near a high-lambda error end up")
     print("LESS accurate than masked positions far from one -- the amplification")
@@ -327,6 +385,22 @@ def main():
         return correct[sel].float().mean().item() if sel.any() else float("nan")
 
     far = ~near & ~flagged
+
+    # Per-sequence tallies, so intervals can be bootstrapped later without
+    # re-running inference. Clustering matters: positions inside one sequence
+    # are correlated, so a plain binomial interval over ~26k positions would be
+    # far too narrow. Resample SEQUENCES, not positions.
+    groups = {"flagged": flagged, "near": near, "far": far}
+    per_seq = []
+    for sname in seq.unique().tolist():
+        m = seq == sname
+        row = {"seq": int(sname)}
+        for gname, gsel in groups.items():
+            sel = m & gsel
+            row[f"n_{gname}"] = int(sel.sum())
+            row[f"c_{gname}"] = int(correct[sel].sum())
+        per_seq.append(row)
+
     res = {
         "tag": args.tag,
         "alg": args.alg,
@@ -344,6 +418,7 @@ def main():
         "acc_far": acc(far),
         "acc_overall": correct.float().mean().item(),
         "examples": examples,
+        "per_sequence": per_seq,
     }
     res["neighbour_penalty"] = res["acc_far"] - res["acc_neighbours"]
 
