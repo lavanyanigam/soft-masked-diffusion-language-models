@@ -138,6 +138,11 @@ def main():
                 "model.length=1024",
                 f"loader.batch_size={args.batch}",
                 f"loader.eval_batch_size={args.batch}",
+                f"loader.global_batch_size={args.batch}",
+                f"loader.eval_global_batch_size={args.batch}",
+                "trainer.devices=1",
+                "trainer.num_nodes=1",
+                "trainer.accumulate_grad_batches=1",
                 f"eval.checkpoint_path={args.ckpt}",
                 f"seed={args.seed}",
                 "+wandb.offline=true",
@@ -147,8 +152,21 @@ def main():
         with open_dict(cfg):
             cfg.algo.tran_head.fixed_lambda = args.fixed_lambda
 
+    # dataloader.get_dataloaders asserts
+    #   global_batch_size == batch_size * num_nodes * torch.cuda.device_count() * accum
+    # and reads the GPU count from the device itself, not from trainer.devices.
+    # Pin the run to one visible GPU and make that identity hold trivially.
+    n_vis = torch.cuda.device_count()
+    if n_vis != 1:
+        sys.exit(
+            f"[fatal] {n_vis} GPUs visible; this analysis expects exactly 1.\n"
+            f"        Re-run with e.g. CUDA_VISIBLE_DEVICES=0"
+        )
+
     tokenizer = dataloader.get_tokenizer(cfg)
-    _, valid_ds = dataloader.get_dataloaders(cfg, skip_train=True, valid_seed=args.seed)
+    _, valid_ds = dataloader.get_dataloaders(
+        cfg, tokenizer, skip_train=True, valid_seed=args.seed
+    )
 
     model = main_mod._load_from_checkpoint(
         diffusion_model=algo_mod.MDLM_SM, config=cfg, tokenizer=tokenizer
