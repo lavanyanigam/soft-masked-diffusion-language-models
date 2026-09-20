@@ -120,6 +120,7 @@ def main():
     import dataloader
     import algo as algo_mod
     import main as main_mod
+    from trainer_base import sample_categorical
 
     L.seed_everything(args.seed)
 
@@ -227,8 +228,11 @@ def main():
 
         with torch.no_grad():
             for i in range(args.steps):
-                t = timesteps[i] * torch.ones(B, 1, device="cuda")
-                sigma = model._sigma_from_alphat(model.noise(t)[1])
+                # Shapes follow MDLM_SM._ddpm_caching_update exactly: t is
+                # squeezed to 1-D and the move chances are (B,1,1) so they
+                # broadcast against p_x0's (B,L,V).
+                t = timesteps[i] * torch.ones(B, device="cuda")
+                sigma = model._sigma_from_alphat(model.noise(t[:, None])[1])
                 tv = float(timesteps[i])
                 in_band = t_min <= tv <= t_max
                 feedback = log_p_cache if in_band else None
@@ -258,16 +262,14 @@ def main():
 
                 log_p_cache = log_p
 
-                # DDPM update, same form as MDLM_SM._ddpm_caching_update
-                mc_t = t[:, None]
-                mc_s = (t - dt)[:, None]
-                q = p_x0 * (mc_t - mc_s).unsqueeze(-1).squeeze(1)
-                q[:, :, mask_index] = mc_s.expand(B, L)
-                nxt = torch.multinomial(
-                    q.reshape(-1, q.shape[-1]).clamp_min(0), 1
-                ).reshape(B, L)
-                copy_flag = (x != mask_index).long()
-                x = copy_flag * x + (1 - copy_flag) * nxt
+                # DDPM update, verbatim from MDLM_SM._ddpm_caching_update
+                move_chance_t = t[:, None, None]
+                move_chance_s = (t - dt)[:, None, None]
+                q_xs = p_x0 * (move_chance_t - move_chance_s)
+                q_xs[:, :, mask_index] = move_chance_s[:, :, 0]
+                _x = sample_categorical(q_xs)
+                copy_flag = (x != mask_index).to(x.dtype)
+                x = copy_flag * x + (1 - copy_flag) * _x
 
         # ---- score ------------------------------------------------------
         final_correct = (x == x0) & masked0
