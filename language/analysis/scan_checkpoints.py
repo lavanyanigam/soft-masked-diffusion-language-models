@@ -19,16 +19,25 @@ import sys
 import torch
 
 
+_MISSING = object()
+
+
 def get(cfg, *path, default=None):
+    """Fetch a nested key, distinguishing 'absent' from 'present and null'.
+
+    fixed_lambda is null for every learned-lambda run, so collapsing None into
+    the default made those rows indistinguishable from ones where the key was
+    missing -- and the --learned-only filter matched nothing.
+    """
     cur = cfg
     for k in path:
-        if cur is None:
+        if cur is _MISSING:
             return default
         try:
             cur = cur[k]
         except Exception:
-            cur = getattr(cur, k, None)
-    return default if cur is None else cur
+            cur = getattr(cur, k, _MISSING)
+    return default if cur is _MISSING else cur
 
 
 def scan(path):
@@ -50,6 +59,7 @@ def scan(path):
         "path": path,
         "step": c.get("global_step"),
         "alg": get(cfg, "algo", "tran_head", "transparency_alg", default="?"),
+        # None here means learned lambda; "?" means the key was not in the config.
         "fixed_lambda": get(cfg, "algo", "tran_head", "fixed_lambda", default="?"),
         "seed": get(cfg, "seed", default="?"),
         "scale": round(torch.sigmoid(rs).item(), 5) if rs is not None else None,
@@ -80,7 +90,7 @@ def main():
         if "error" in r:
             print(f"  ! {r['error']}: {f}", file=sys.stderr)
             continue
-        if args.learned_only and not (r["has_head"] and r["fixed_lambda"] in (None, "None")):
+        if args.learned_only and not (r["has_head"] and r["fixed_lambda"] is None):
             continue
         if (r["step"] or 0) < args.min_step:
             continue
@@ -90,7 +100,7 @@ def main():
     print(f"{'alg':<20}{'seed':>5}{'step':>8}{'fixed_lambda':>14}{'scale':>9}  path")
     for r in rows:
         fl = r["fixed_lambda"]
-        fl = "learned" if fl in (None, "None") else str(fl)
+        fl = "learned" if fl is None else ("?" if fl == "?" else str(fl))
         print(f"{str(r['alg']):<20}{str(r['seed']):>5}{str(r['step']):>8}"
               f"{fl:>14}{str(r['scale']):>9}  {r['path']}")
     print("\nlambda regime comes from the checkpoint's own config, not its path.")
