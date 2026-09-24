@@ -1,7 +1,11 @@
 # Lost in Interpolation: Spherical Soft-Masking (SLERP-SM) for Diffusion Language Models
 
 Official PyTorch implementation of **Spherical Soft-Masking (SLERP-SM)** for masked diffusion language models (MDLMs), from the paper:
-> **Lost in Interpolation: Why Predictive Feedback Fails in Diffusion Language Models** (COLM 2026)
+
+> **[Lost in Interpolation: Why Predictive Feedback Fails in Diffusion Language Models](https://arxiv.org/abs/2608.06529)**  
+> *Conference on Language Modeling (COLM 2026)*
+
+**Paper:** [arXiv:2608.06529](https://arxiv.org/abs/2608.06529)
 
 <div align="center">
   <img src='./assets/slerp_vs_lerp.png' width="85%"/>
